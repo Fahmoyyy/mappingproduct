@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mapping Produk RAB → Katalog Produk</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="app-header">
+  <h1>Mapping Produk RAB → Katalog Produk</h1>
+  <p class="subtitle">Cocokkan kolom <code>Uraian</code> pada RAB Detail ke katalog produk PLN HOME (fuzzy matching)</p>
+  <button type="button" id="btnToggleSynonyms" class="link-btn">📖 Kamus Sinonim / Istilah Lain</button>
+</header>
+
+<main>
+  <section id="synonym-section" class="panel hidden">
+    <p class="hint">
+      Kalau ada Uraian RAB yang pakai kata berbeda dari nama produk di katalog (misal <em>"jaket"</em> vs <em>"seragam"</em>,
+      atau singkatan lain), tambahkan pasangan katanya di sini. Auto-mapping akan menganggap kata-kata dalam satu grup
+      sebagai hal yang sama. Tersimpan otomatis di browser ini (localStorage) — klik <strong>Export</strong> untuk
+      menyimpan permanen ke file <code>synonyms.json</code> supaya ikut terbawa kalau tool dipindah/dibagikan.
+    </p>
+    <div id="synonymList" class="synonym-list"></div>
+    <div class="synonym-add-row">
+      <input type="text" id="synonymInput" placeholder="contoh: jaket, seragam, rompi (pisahkan dengan koma)">
+      <button type="button" id="btnAddSynonym" class="btn btn-primary">Tambah</button>
+      <button type="button" id="btnExportSynonyms" class="btn-clear">Export synonyms.json</button>
+    </div>
+  </section>
+
+  <section id="upload-section" class="panel">
+    <div id="dropzone" class="dropzone">
+      <p><strong>Drag &amp; drop</strong> file RAB Detail (.xlsx) di sini, atau</p>
+      <label class="file-picker-btn">
+        Pilih File
+        <input type="file" id="fileInput" accept=".xlsx" hidden>
+      </label>
+      <p class="hint">Sheet yang dibaca: <strong>RAB Detail</strong> (header di baris 1)</p>
+    </div>
+    <div id="uploadInfo" class="upload-info hidden"></div>
+  </section>
+
+  <section id="workspace" class="panel hidden">
+    <div class="toolbar">
+      <button id="btnAutoMatch" class="btn btn-primary">Jalankan Mapping Otomatis</button>
+      <div class="toolbar-spacer"></div>
+      <label class="filter-toggle">
+        <input type="checkbox" id="filterUnmapped">
+        Tampilkan hanya baris belum dipetakan
+      </label>
+      <button id="btnExport" class="btn btn-success">Export xlsx</button>
+    </div>
+
+    <div class="progress-bar-wrap">
+      <div class="progress-bar">
+        <div id="progressFill" class="progress-fill"></div>
+      </div>
+      <span id="progressLabel" class="progress-label">0 dari 0 baris sudah diproses</span>
+    </div>
+
+    <div id="matchingStatus" class="matching-status hidden"></div>
+
+    <div id="rowsContainer" class="rows-container"></div>
+  </section>
+</main>
+
+<footer class="app-footer">
+  <span>Tool lokal — semua proses (baca xlsx, fuzzy match, export) berjalan di browser, tidak ada data yang dikirim ke server.</span>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
