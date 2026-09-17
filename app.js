@@ -101,7 +101,128 @@
     return 0;
   }
 
-  function scoreCatalogItem(item, uraianLower, uraianTokenSet) {
+  function getMatchEvidence(item, text, satuan, kelompokAffinity) {
+    const uraianLower = canonicalizeLower(text);
+    const uraianTokenSet = new Set(tokenize(text));
+    const evidence = item._tokens
+      .map((catToken) => {
+        if (uraianTokenSet.has(catToken)) return { token: catToken, type: "persis" };
+        if (catToken.length >= 2 && uraianLower.includes(catToken)) return { token: catToken, type: "bagian kata" };
+        for (const uraianToken of uraianTokenSet) {
+          if (uraianToken.length >= 2 && (catToken.startsWith(uraianToken) || uraianToken.startsWith(catToken))) {
+            return { token: catToken, type: "variasi kata" };
+          }
+        }
+        if (catToken.length >= 4) {
+          for (const uraianToken of uraianTokenSet) {
+            if (Math.abs(uraianToken.length - catToken.length) <= 1 && levenshtein(uraianToken, catToken) <= 1) {
+              return { token: catToken, type: "kemiripan ejaan" };
+            }
+          }
+        }
+        return null;
+      })
+      .filter(Boolean);
+    if (unitMatchBonus(satuan, item.unit) > 0) {
+      evidence.push({ token: item.unit, type: "satuan cocok" });
+    }
+    if (kelompokBonus(kelompokAffinity, item.kelompok) >= 0.03) {
+      evidence.push({ token: item.kelompok, type: "konteks kelompok cocok" });
+    }
+    return evidence;
+  }
+
+  // ---------- Sinyal Satuan RAB ----------
+  // Overlap kata saja gampang salah kaprah: "Tang Potong" (alat) ikut nyangkut di uraian
+  // "Potong/tebang pohon" (jasa) cuma gara-gara sama-sama punya kata "potong", padahal alat
+  // potong kawat jelas beda konteks dari jasa tebang pohon. Sinyal yang jauh lebih dipercaya
+  // dan sudah ada di data tapi belum dipakai: Satuan RAB (kolom "Satuan" di file RAB, mis.
+  // "POHON") vs satuan bawaan produk di katalog (mis. unit "Pohon" milik "PANGKAS POHON SAWIT").
+  // Kalau dua-duanya sama-sama pakai satuan yang SPESIFIK (bukan satuan umum kayak "Buah"/"Set"
+  // yang dipakai ratusan produk), itu petunjuk kuat baris ini memang soal jasa/barang bersatuan
+  // itu -- dipakai sebagai bonus skor di atas overlap kata, bukan pengganti.
+  let unitFrequency = new Map();
+
+  function normalizeUnitKey(u) {
+    return String(u ?? "").trim().toLowerCase();
+  }
+
+  function computeUnitFrequency() {
+    unitFrequency = new Map();
+    for (const item of catalog) {
+      const key = normalizeUnitKey(item.unit);
+      if (!key) continue;
+      unitFrequency.set(key, (unitFrequency.get(key) || 0) + 1);
+    }
+  }
+
+  function unitMatchBonus(rowSatuan, itemUnit) {
+    const a = normalizeUnitKey(rowSatuan);
+    const b = normalizeUnitKey(itemUnit);
+    if (!a || !b || a !== b) return 0;
+    const freq = unitFrequency.get(b) || 0;
+    if (freq <= 5) return 0.35;
+    if (freq <= 20) return 0.2;
+    if (freq <= 50) return 0.08;
+    return 0; // satuan terlalu umum (mis. "Buah"/"Set"/"Units") -- tidak informatif
+  }
+
+  // ---------- Sinyal Konteks Kelompok ----------
+  // Overlap kata per-item tidak "tahu" konteks pekerjaannya apa -- makanya kata generik kayak
+  // "potong" gampang nyasar ke alat (Peralatan Kerja) padahal maksud Uraian-nya jasa (Jasa).
+  // Di sini kita bangun profil kosakata per Kelompok (Jasa, Material, Peralatan Kerja, dst.)
+  // dari nama semua produk katalog -- murni dari data, tanpa daftar kata kunci manual -- lalu
+  // cek kosakata Uraian ini paling "mirip" ke Kelompok mana. Kata yang cuma muncul di 1-2
+  // Kelompok (mis. "pangkas" cuma di Jasa) jauh lebih diskriminatif daripada kata yang tersebar
+  // di hampir semua Kelompok (mis. "besar"/"kecil"), jadi dibobot terbalik dengan jumlah
+  // Kelompok yang memuatnya. Hasilnya bonus skor kecil untuk produk yang se-Kelompok dengan
+  // dugaan konteks Uraian -- sinyal ketiga di samping overlap kata dan kecocokan satuan.
+  const KELOMPOK_BONUS_MAX = 0.15;
+  let kelompokTokenGroups = new Map(); // token -> Set(kelompok)
+  let kelompokCount = 0;
+
+  function computeKelompokProfiles() {
+    kelompokTokenGroups = new Map();
+    const kelompokSeen = new Set();
+    for (const item of catalog) {
+      const k = item.kelompok || "";
+      if (!k) continue;
+      kelompokSeen.add(k);
+      for (const t of item._tokens) {
+        if (!kelompokTokenGroups.has(t)) kelompokTokenGroups.set(t, new Set());
+        kelompokTokenGroups.get(t).add(k);
+      }
+    }
+    kelompokCount = kelompokSeen.size;
+  }
+
+  function computeKelompokAffinity(uraianTokenSet) {
+    const raw = new Map();
+    for (const t of uraianTokenSet) {
+      const groups = kelompokTokenGroups.get(t);
+      if (!groups || !groups.size) continue;
+      const w = 1 / groups.size; // makin sedikit Kelompok yang punya kata ini, makin diskriminatif
+      for (const k of groups) raw.set(k, (raw.get(k) || 0) + w);
+    }
+    let total = 0;
+    for (const v of raw.values()) total += v;
+    if (!total || kelompokCount < 2) return new Map();
+    const baseline = 1 / kelompokCount;
+    const affinity = new Map();
+    for (const [k, v] of raw) {
+      const share = v / total;
+      const excess = Math.max(0, (share - baseline) / (1 - baseline));
+      if (excess > 0) affinity.set(k, excess);
+    }
+    return affinity;
+  }
+
+  function kelompokBonus(affinity, itemKelompok) {
+    if (!affinity || !affinity.size) return 0;
+    return (affinity.get(itemKelompok) || 0) * KELOMPOK_BONUS_MAX;
+  }
+
+  function scoreCatalogItem(item, uraianLower, uraianTokenSet, rowSatuan, kelompokAffinity) {
     const catTokens = item._tokens;
     if (!catTokens.length) return 0;
     let matched = 0, total = 0;
@@ -110,10 +231,12 @@
       total += w;
       matched += w * tokenMatchWeight(ct, uraianLower, uraianTokenSet);
     }
-    return total ? matched / total : 0;
+    const base = total ? matched / total : 0;
+    const bonus = unitMatchBonus(rowSatuan, item.unit) + kelompokBonus(kelompokAffinity, item.kelompok);
+    return Math.min(1, base + bonus);
   }
 
-  function findCandidates(text, limit, minScore) {
+  function findCandidates(text, limit, minScore, satuan) {
     // Karena sekarang top-N SELALU ditampilkan (skor rendah tidak lagi disaring habis --
     // lihat MIN_SCORE_AUTO di atas), filter-lalu-sort-semua-1155-item per baris jadi mahal
     // kalau dikali 1000+ baris. Jaga performa dengan insertion ke array kecil ukuran `limit`
@@ -121,15 +244,16 @@
     const uraianLower = canonicalizeLower(text);
     const uraianTokenSet = new Set(tokenize(text));
     if (!uraianTokenSet.size) return [];
+    const kelompokAffinity = computeKelompokAffinity(uraianTokenSet);
     const top = [];
     for (const item of catalog) {
-      const score = scoreCatalogItem(item, uraianLower, uraianTokenSet);
+      const score = scoreCatalogItem(item, uraianLower, uraianTokenSet, satuan, kelompokAffinity);
       if (score < minScore) continue;
       if (top.length < limit) {
-        top.push({ item, score });
+        top.push({ item, score, evidence: getMatchEvidence(item, text, satuan, kelompokAffinity) });
         if (top.length === limit) top.sort((a, b) => b.score - a.score);
       } else if (score > top[top.length - 1].score) {
-        top[top.length - 1] = { item, score };
+        top[top.length - 1] = { item, score, evidence: getMatchEvidence(item, text, satuan, kelompokAffinity) };
         top.sort((a, b) => b.score - a.score);
       }
     }
@@ -142,7 +266,7 @@
   let catalogReady = false;
   let headerRow = [];
   let colIdx = { uraian: -1, produk: -1, satuan: -1, volume: -1 };
-  let rows = []; // { uraian, satuanDisplay, volumeDisplay, raw: [], candidates: [], selectedItem: null, skipped: false }
+  let rows = []; // { uraian, satuanDisplay, volumeDisplay, raw: [], candidates: [], selectedItem: null }
   let originalFileName = "rab";
   let filterUnmappedOnly = false;
 
@@ -157,11 +281,13 @@
   const progressFill = document.getElementById("progressFill");
   const progressLabel = document.getElementById("progressLabel");
   const matchingStatus = document.getElementById("matchingStatus");
+  const exportWarning = document.getElementById("exportWarning");
   const rowsContainer = document.getElementById("rowsContainer");
   const btnToggleSynonyms = document.getElementById("btnToggleSynonyms");
   const synonymSection = document.getElementById("synonym-section");
   const synonymList = document.getElementById("synonymList");
   const synonymInput = document.getElementById("synonymInput");
+  const synonymError = document.getElementById("synonymError");
   const btnAddSynonym = document.getElementById("btnAddSynonym");
   const btnExportSynonyms = document.getElementById("btnExportSynonyms");
 
@@ -188,6 +314,8 @@
       catalog.forEach((item) => {
         item._tokens = tokenize(item.nameClean || item.name);
       });
+      computeUnitFrequency();
+      computeKelompokProfiles();
       catalogReady = true;
     } catch (err) {
       showUploadInfo(
@@ -204,6 +332,7 @@
     catalog.forEach((item) => {
       item._tokens = tokenize(item.nameClean || item.name);
     });
+    computeKelompokProfiles();
   }
 
   // ---------- Kamus Sinonim: load/save/UI ----------
@@ -251,9 +380,11 @@
     if (!raw) return;
     const terms = raw.split(",").map((t) => t.trim()).filter(Boolean);
     if (terms.length < 2) {
-      alert("Masukkan minimal 2 istilah dipisah koma, contoh: jaket, seragam");
+      synonymError.textContent = "Masukkan minimal 2 istilah dipisah koma, contoh: jaket, seragam.";
+      synonymError.classList.remove("hidden");
       return;
     }
+    synonymError.classList.add("hidden");
     synonymGroups.push(terms);
     synonymInput.value = "";
     rebuildSynonymRules();
@@ -365,7 +496,6 @@
       raw: r.slice(),
       candidates: [],
       selectedItem: null,
-      skipped: false,
     }));
 
     showUploadInfo(
@@ -374,6 +504,7 @@
     );
     workspace.classList.remove("hidden");
     btnExport.disabled = false;
+    exportWarning.classList.add("hidden");
     renderAllRows();
     updateProgress();
   }
@@ -394,7 +525,7 @@
       const end = Math.min(i + chunkSize, total);
       for (; i < end; i++) {
         const row = rows[i];
-        row.candidates = row.uraian ? findCandidates(row.uraian, 4, MIN_SCORE_AUTO) : [];
+        row.candidates = row.uraian ? findCandidates(row.uraian, 4, MIN_SCORE_AUTO, row.satuanDisplay) : [];
       }
       matchingStatus.textContent = `Mencocokkan baris ${i} dari ${total}...`;
       if (i < total) {
@@ -406,9 +537,9 @@
         ).length;
         const weakOnly = total - withoutAnyCandidate - confident;
         matchingStatus.innerHTML =
-          `Mapping otomatis selesai untuk ${total} baris: <strong>${confident}</strong> baris dapat kandidat kuat, ` +
-          `<strong>${weakOnly}</strong> baris hanya dapat kandidat lemah (skor rendah, periksa baik-baik / kemungkinan bukan item barang)` +
-          (withoutAnyCandidate > 0 ? `, <strong>${withoutAnyCandidate}</strong> baris tanpa kandidat sama sekali.` : ".") +
+          `Pemetaan otomatis selesai — ${total} baris diproses: <strong>${confident}</strong> kandidat kuat, ` +
+          `<strong>${weakOnly}</strong> kandidat lemah (perlu diperiksa manual)` +
+          (withoutAnyCandidate > 0 ? `, <strong>${withoutAnyCandidate}</strong> tanpa kandidat.` : ".") +
           ` <button type="button" id="btnDismissMatchStatus" class="btn-clear" style="margin-left:8px;padding:2px 10px;">Tutup</button>`;
         document.getElementById("btnDismissMatchStatus").addEventListener("click", () => {
           matchingStatus.classList.add("hidden");
@@ -423,9 +554,7 @@
 
   // ---------- Rendering ----------
   function rowStatus(row) {
-    if (row.skipped) return "skipped";
-    if (row.selectedItem) return "mapped";
-    return "pending";
+    return row.selectedItem ? "mapped" : "pending";
   }
 
   function renderAllRows() {
@@ -435,23 +564,29 @@
 
   function renderRowCard(row, index) {
     const status = rowStatus(row);
-    const statusLabel = { pending: "Belum dipetakan", mapped: "Sudah dipetakan", skipped: "Di-skip" }[status];
+    const statusLabel = { pending: "Belum dipetakan", mapped: "Sudah dipetakan" }[status];
 
     const allLowConfidence = row.candidates.length > 0 && row.candidates.every((c) => c.score < LOW_CONFIDENCE_THRESHOLD);
     const candidatesHtml = row.candidates.length
-      ? `${allLowConfidence ? '<div class="low-confidence-warning">⚠ Skor kandidat di bawah semua rendah — kemungkinan baris ini bukan item barang (mis. baris rekap/lump-sum). Periksa dulu sebelum memilih, atau Skip.</div>' : ""}
+      ? `${allLowConfidence ? '<div class="low-confidence-warning">Semua kandidat berskor rendah — kemungkinan baris ini bukan item barang. Tetap wajib dipetakan, periksa manual sebelum memilih.</div>' : ""}
         <div class="candidates">${row.candidates
           .map((c, ci) => {
-            const selected = row.selectedItem && row.selectedItem.ref === c.item.ref && !row.skipped;
+            const selected = row.selectedItem && row.selectedItem.ref === c.item.ref;
             const lowConf = c.score < LOW_CONFIDENCE_THRESHOLD;
+            const scoreTier = c.score >= 0.6 ? "high" : c.score >= LOW_CONFIDENCE_THRESHOLD ? "mid" : "low";
+            const evidence = c.evidence || [];
+            const evidenceText = evidence.length
+              ? `Dasar kecocokan: ${evidence.map((match) => `${escapeHtml(match.token)} (${match.type})`).join(", ")}`
+              : "Tidak ada kata yang cocok secara langsung — periksa manual sebelum memilih.";
             return `<button type="button" class="candidate-card${selected ? " selected" : ""}${lowConf ? " low-confidence" : ""}" data-action="select-candidate" data-row="${index}" data-cand="${ci}">
-              <span class="candidate-score">${Math.round(c.score * 100)}%</span>
+              <span class="candidate-score score-${scoreTier}">${Math.round(c.score * 100)}%</span>
               <div class="candidate-name">${escapeHtml(c.item.name)}</div>
               <div class="candidate-detail">${escapeHtml(c.item.unit || "-")} · ${escapeHtml(c.item.kelompok || "-")}</div>
+              <div class="candidate-reason">${evidenceText}</div>
             </button>`;
           })
           .join("")}</div>`
-      : `<div class="no-candidates">Tidak ada kandidat sama sekali di katalog (tidak ada kemiripan kata apa pun). Cari manual di bawah atau Skip.</div>`;
+      : `<div class="no-candidates">Tidak ditemukan kandidat yang cocok di katalog. Baris ini tetap wajib dipetakan — gunakan pencarian manual di bawah.</div>`;
 
     const selectedSummary = row.selectedItem
       ? `<div class="selected-summary">Dipilih: <strong>${escapeHtml(row.selectedItem.name)}</strong></div>`
@@ -475,10 +610,7 @@
           <input type="text" class="manual-search-input" placeholder="Cari produk lain secara manual..." data-row="${index}" autocomplete="off">
           <div class="manual-search-results hidden" data-row="${index}"></div>
         </div>
-        <button type="button" class="btn-skip${row.skipped ? " active" : ""}" data-action="toggle-skip" data-row="${index}">
-          ${row.skipped ? "Batalkan Skip" : "Skip / Tidak Perlu Mapping"}
-        </button>
-        ${status !== "pending" ? `<button type="button" class="btn-clear" data-action="clear-row" data-row="${index}">Reset</button>` : ""}
+        ${status === "mapped" ? `<button type="button" class="btn-clear" data-action="clear-row" data-row="${index}">Reset</button>` : ""}
       </div>
     </div>`;
   }
@@ -504,10 +636,10 @@
 
   function updateProgress() {
     const total = rows.length;
-    const processed = rows.filter((r) => r.skipped || r.selectedItem).length;
+    const processed = rows.filter((r) => r.selectedItem).length;
     const pct = total ? Math.round((processed / total) * 100) : 0;
     progressFill.style.width = pct + "%";
-    progressLabel.textContent = `${processed} dari ${total} baris sudah diproses`;
+    progressLabel.textContent = `${processed} dari ${total} baris sudah dipetakan`;
   }
 
   // ---------- Row actions (event delegation) ----------
@@ -530,17 +662,10 @@
       if (action === "select-candidate") {
         const candIdx = Number(target.dataset.cand);
         row.selectedItem = row.candidates[candIdx].item;
-        row.skipped = false;
-        updateRowCardDom(index);
-        updateProgress();
-      } else if (action === "toggle-skip") {
-        row.skipped = !row.skipped;
-        if (row.skipped) row.selectedItem = null;
         updateRowCardDom(index);
         updateProgress();
       } else if (action === "clear-row") {
         row.selectedItem = null;
-        row.skipped = false;
         updateRowCardDom(index);
         updateProgress();
       }
@@ -555,7 +680,6 @@
       const item = catalog.find((c) => c.ref === ref);
       if (item) {
         rows[index].selectedItem = item;
-        rows[index].skipped = false;
         updateRowCardDom(index);
         updateProgress();
       }
@@ -583,7 +707,7 @@
         return;
       }
       if (!catalogReady) return;
-      const results = findCandidates(query, 8, MIN_SCORE_MANUAL);
+      const results = findCandidates(query, 8, MIN_SCORE_MANUAL, rows[index].satuanDisplay);
       if (!results.length) {
         resultsEl.innerHTML = `<div class="manual-search-item">Tidak ada hasil.</div>`;
       } else {
@@ -608,8 +732,22 @@
   });
 
   // ---------- Export ----------
+  // Setiap baris RAB wajib punya produk -- tidak ada opsi skip. Export diblokir selama
+  // masih ada baris yang belum dipetakan, supaya file hasil export tidak pernah punya baris kosong.
   function exportXlsx() {
     if (!rows.length) return;
+
+    const unmapped = rows.filter((r) => !r.selectedItem).length;
+    if (unmapped > 0) {
+      exportWarning.textContent =
+        `Belum bisa export — masih ada ${unmapped} baris yang belum diberi produk. Lengkapi seluruh baris terlebih dahulu.`;
+      exportWarning.classList.remove("hidden");
+      filterUnmapped.checked = true;
+      filterUnmappedOnly = true;
+      applyFilter();
+      return;
+    }
+    exportWarning.classList.add("hidden");
 
     const newHeader = headerRow.slice();
     let produkIdx = colIdx.produk;
@@ -624,12 +762,8 @@
     rows.forEach((row) => {
       const cells = row.raw.slice();
       while (cells.length < newHeader.length) cells.push("");
-      if (row.selectedItem && !row.skipped) {
-        cells[produkIdx] = row.selectedItem.name;
-        cells[refColIdx] = row.selectedItem.ref;
-      } else {
-        cells[refColIdx] = "";
-      }
+      cells[produkIdx] = row.selectedItem.name;
+      cells[refColIdx] = row.selectedItem.ref;
       aoa.push(cells);
     });
 

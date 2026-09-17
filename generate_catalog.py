@@ -63,7 +63,7 @@ def main():
         ref = "" if ref is None else str(ref)
         kelompok_id = row[col["KELOMPOK_ASET"]]
         item = {
-            "name": str(name).strip(),
+              "name": str(name).strip(),
             "nameClean": clean_name(str(name)),
             "ref": ref,
             "unit": normalize_unit(row[col["SATUAN"]]),
